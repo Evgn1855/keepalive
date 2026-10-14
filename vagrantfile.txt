@@ -1,0 +1,105 @@
+# Скрипт автоматической установки Docker и Docker Compose
+$setup_script = <<-'SCRIPT'
+
+  echo "--- 1. Создание нового пользователя (siadmin) ---"
+  # Создаем пользователя 'siadmin', задаем ему bash и домашнюю директорию
+  useradd -m -s /bin/bash siadmin
+
+  # Задаем пароль 'my_secret_password' (ИЗМЕНИТЕ НА СВОЙ)
+  echo "siadmin:my_secret_password" | chpasswd
+
+  # Разрешаем использовать sudo без ввода пароля (удобно для разработки)
+  echo "siadmin ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/siadmin
+
+
+
+  echo "--- 2. Установка Docker и Docker Compose ---"
+  echo "--- Обновление пакетов и установка зависимостей ---"
+  apt-get update -y
+  apt-get install -y ca-certificates curl gnupg lsb-release
+
+  echo "--- Добавление официального GPG-ключа Docker ---"
+  mkdir -m 0755 -p /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+  echo "--- Настройка репозитория Docker ---"
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+    $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+  echo "--- Установка Docker и Docker Compose ---"
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  echo "--- Добавление пользователя vagrant в группу docker ---"
+  usermod -aG docker vagrant
+  usermod -aG docker siadmin
+SCRIPT
+
+# Специфичный скрипт для запуска Nginx на машине WEB
+$nginx_script = <<-'SCRIPT'
+  echo "--- 4. Создание проекта и запуск Nginx через Docker Compose ---"
+  TARGET_DIR="/home/siadmin/app"
+  mkdir -p $TARGET_DIR
+
+  # Создаем файл docker-compose.yml внутри виртуалки
+  cat <<EOF > $TARGET_DIR/docker-compose.yml
+version: '3.8'
+services:
+  web-server:
+    image: nginx:latest
+    container_name: my-nginx
+    ports:
+      - "80:80"
+    restart: always
+EOF
+
+  # Назначаем права пользователю siadmin на его папку
+  chown -R siadmin:siadmin /home/siadmin/app
+
+  # Запускаем контейнер Nginx в фоновом режиме
+  cd $TARGET_DIR
+  docker compose up -d
+SCRIPT
+
+
+#Конфигурация VM
+Vagrant.configure("2") do |config|
+
+  # Общие настройки для всех машин (используем образ Ubuntu 22.04)
+  config.vm.box = "ubuntu/jammy64"
+  config.ssh.username = "vagrant"
+
+
+  # Конфигурация первой машины (vm1)
+  config.vm.define "web1" do |web1|
+    web1.vm.hostname = "server1"
+    # Настройка сети: приватный IP для связи между машинами
+    web1.vm.network "public_network", ip: "192.168.0.11", bridge:"enp0s31f6"
+
+    # Настройки VirtualBox для первой машины
+    web1.vm.provider "virtualbox" do |vb|
+      vb.name = "server1"
+      vb.memory = "2048" # ОЗУ в МБ
+      vb.cpus = 2        # Количество ядер CPU
+    end
+    # Применяем скрипты к первой машине
+    web1.vm.provision "shell", inline: $setup_script
+    web1.vm.provision "shell", inline: $nginx_script
+  end
+
+  # Конфигурация второй машины (vm2)
+  config.vm.define "web2" do |web2|
+    web2.vm.hostname = "server2"
+    web2.vm.network "public_network", ip: "192.168.0.12", bridge:"enp0s31f6"
+
+    # Настройки VirtualBox для второй машины
+    web2.vm.provider "virtualbox" do |vb|
+      vb.name = "server2"
+      vb.memory = "2048"
+      vb.cpus = 2
+    end
+    web2.vm.provision "shell", inline: $setup_script
+    web2.vm.provision "shell", inline: $nginx_script
+  end
+end
